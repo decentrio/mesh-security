@@ -1,5 +1,5 @@
 use cosmwasm_std::{
-    coin, ensure, Addr, Binary, Coin, Decimal, DepsMut, Fraction, Order, Reply, Response, StdResult, Storage, SubMsg, SubMsgResponse, Uint128, WasmMsg
+    coin, ensure, Addr, Binary, Coin, Decimal, DepsMut, Fraction, Order, Reply, Response, StdResult, Storage, SubMsgResponse, Uint128, WasmMsg
 };
 use cw2::set_contract_version;
 use cw_storage_plus::{Bounder, Item, Map};
@@ -11,9 +11,9 @@ use mesh_apis::local_staking_api::{
     sv::LocalStakingApiQueryMsg, LocalStakingApiHelper, SlashRatioResponse,
 };
 use mesh_apis::vault_api::{self, SlashInfo, VaultApi};
-use mesh_bindings::{VaultCustomMsg, VaultMsg};
 use mesh_sync::Tx::InFlightStaking;
 use mesh_sync::{max_range, ValueRange};
+use mesh_bindings::VaultCustomMsg;
 
 use sylvia::types::{ExecCtx, InstantiateCtx, QueryCtx, ReplyCtx};
 use sylvia::{contract, schemars};
@@ -26,50 +26,32 @@ use crate::msg::{
 };
 use crate::state::{Config, Lien, LocalStaking, UserInfo};
 use crate::txs::Txs;
+use crate::contract::{CONTRACT_NAME, CONTRACT_VERSION, REPLY_ID_INSTANTIATE, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 
-pub const CONTRACT_NAME: &str = env!("CARGO_PKG_NAME");
-pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-pub const REPLY_ID_INSTANTIATE: u64 = 1;
-
-pub const DEFAULT_PAGE_LIMIT: u32 = 10;
-pub const MAX_PAGE_LIMIT: u32 = 30;
-
-/// Aligns pagination limit
 fn clamp_page_limit(limit: Option<u32>) -> usize {
     limit.unwrap_or(DEFAULT_PAGE_LIMIT).max(MAX_PAGE_LIMIT) as usize
 }
 
-/// Default falseness for serde
 fn def_false() -> bool {
     false
 }
 
-pub struct VaultContract<'a> {
-    /// General contract configuration
+/// This is a stub implementation of the virtual staking contract, for test purposes only.
+pub struct VaultMock<'a> {
     pub config: Item<'a, Config>,
-    /// Local staking info
     pub local_staking: Item<'a, Option<LocalStaking>>,
-    /// All liens in the protocol
-    ///
-    /// Liens are indexed with (user, lien_holder), as this pair has to be unique
     pub liens: Map<'a, (&'a Addr, &'a Addr), Lien>,
-    /// Per-user information
     pub users: Map<'a, &'a Addr, UserInfo>,
-    /// All active external staking contracts in use by this vault
     pub active_external: Map<'a, &'a Addr, ()>,
-    /// Pending txs information
     pub tx_count: Item<'a, u64>,
     pub pending: Txs<'a>,
 }
 
-#[cfg_attr(not(feature = "library"), sylvia::entry_points)]
 #[contract]
 #[sv::error(ContractError)]
 #[sv::messages(vault_api as VaultApi)]
-/// Workaround for lack of support in communication `Empty` <-> `Custom` Contracts.
 #[sv::custom(msg=VaultCustomMsg)]
-impl VaultContract<'_> {
+impl VaultMock<'_> {
     pub fn new() -> Self {
         Self {
             config: Item::new("config"),
@@ -106,34 +88,17 @@ impl VaultContract<'_> {
                 LocalStakingInfo::Existing(exist) => {
                     let addr = exist.existing;
 
-                    // Query for max slashing percentage
-                    let query = LocalStakingApiQueryMsg::MaxSlash {};
-                    let SlashRatioResponse {
-                        slash_ratio_dsign, ..
-                    } = ctx.deps.querier.query_wasm_smart(&addr, &query)?;
-
                     let local_staking = LocalStaking {
                         contract: LocalStakingApiHelper(ctx.deps.api.addr_validate(&addr)?),
-                        max_slash: slash_ratio_dsign,
+                        max_slash: Decimal::percent(10),
                     };
 
                     self.local_staking
                         .save(ctx.deps.storage, &Some(local_staking))?;
                     Ok(Response::new())
                 }
-                LocalStakingInfo::New(local_staking) => {
-                    // instantiate local_staking and handle reply
-                    let msg = WasmMsg::Instantiate {
-                        admin: local_staking.admin,
-                        code_id: local_staking.code_id,
-                        msg: local_staking.msg,
-                        funds: vec![],
-                        label: local_staking
-                            .label
-                            .unwrap_or_else(|| "Mesh Security Local Staking".to_string()),
-                    };
-                    let sub_msg = SubMsg::reply_on_success(msg, REPLY_ID_INSTANTIATE);
-                    Ok(Response::new().add_submessage(sub_msg))
+                LocalStakingInfo::New(_) => {
+                    Ok(Response::new())
                 }
             }
         } else {
@@ -155,15 +120,8 @@ impl VaultContract<'_> {
             .unwrap_or_default();
         user.collateral += amount.amount;
         self.users.save(ctx.deps.storage, &ctx.info.sender, &user)?;
-        let amt = amount.amount;
-        let msg = VaultMsg::Bond { delegator: ctx.info.sender.clone().into_string(), amount};
-        let resp = Response::new()
-            .add_message(msg)
-            .add_attribute("action", "unbond")
-            .add_attribute("sender", ctx.info.sender)
-            .add_attribute("amount", amt.to_string());
 
-        Ok(resp)
+        Ok(Response::new())
     }
 
     #[sv::msg(exec)]
@@ -186,18 +144,10 @@ impl VaultContract<'_> {
 
         user.collateral -= amount.amount;
         self.users.save(ctx.deps.storage, &ctx.info.sender, &user)?;
-        let amt = amount.amount;
-        let msg = VaultMsg::Unbond { delegator: ctx.info.sender.clone().into_string(), amount};
-        let resp = Response::new()
-            .add_message(msg)
-            .add_attribute("action", "unbond")
-            .add_attribute("sender", ctx.info.sender)
-            .add_attribute("amount", amt.to_string());
 
-        Ok(resp)
+        Ok(Response::new())
     }
 
-    /// This assigns a claim of amount tokens to the remote contract, which can take some action with it
     #[sv::msg(exec)]
     fn stake_remote(
         &self,
@@ -462,9 +412,6 @@ impl VaultContract<'_> {
         Ok(resp)
     }
 
-    /// Queries for all pending txs.
-    /// Reports txs in descending order (newest first).
-    /// `start_after` is the last tx id included in previous page
     #[sv::msg(query)]
     fn all_pending_txs_desc(
         &self,
@@ -525,17 +472,7 @@ impl VaultContract<'_> {
         Ok(Response::new())
     }
 
-    /// Updates the local stake for staking on any contract
-    ///
-    /// Stake (both local and remote) is always called by the tokens owner, so the `sender` is
-    /// ued as an owner address.
-    ///
-    /// Config is taken in argument as it sometimes is used outside of this function, so
-    /// we want to avoid double-fetching it
-    ///
-    /// Remote indicates if the stake is remote or local. Remote staking involves transaction
-    /// processing.
-    fn stake(
+    pub fn stake(
         &self,
         ctx: &mut ExecCtx,
         config: &Config,
@@ -975,13 +912,7 @@ impl VaultContract<'_> {
     }
 }
 
-impl Default for VaultContract<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VaultApi for VaultContract<'_> {
+impl VaultApi for VaultMock<'_> {
     type Error = ContractError;
     type ExecC = VaultCustomMsg;
 
@@ -1085,7 +1016,11 @@ impl VaultApi for VaultContract<'_> {
         Ok(resp)
     }
 
-    fn commit_tx(&self, mut ctx: ExecCtx, tx_id: u64) -> Result<Response<Self::ExecC>, ContractError> {
+    fn commit_tx(
+        &self,
+        mut ctx: ExecCtx,
+        tx_id: u64,
+    ) -> Result<Response<Self::ExecC>, ContractError> {
         self.commit_stake(&mut ctx, tx_id)?;
 
         let resp = Response::new()
@@ -1096,7 +1031,11 @@ impl VaultApi for VaultContract<'_> {
         Ok(resp)
     }
 
-    fn rollback_tx(&self, mut ctx: ExecCtx, tx_id: u64) -> Result<Response<Self::ExecC>, ContractError> {
+    fn rollback_tx(
+        &self,
+        mut ctx: ExecCtx,
+        tx_id: u64,
+    ) -> Result<Response<Self::ExecC>, ContractError> {
         self.rollback_stake(&mut ctx, tx_id)?;
 
         let resp = Response::new()

@@ -2,23 +2,22 @@ mod utils;
 
 use anyhow::Result as AnyResult;
 
-use cosmwasm_std::{coin, coins, to_json_binary, Decimal, Uint128};
+use cosmwasm_std::{coin, coins, to_json_binary, Decimal, Empty, Uint128};
+use cw_multi_test::{no_init, AppBuilder};
 use mesh_native_staking::contract::sv::mt::CodeId as NativeStakingCodeId;
 use mesh_native_staking::contract::sv::InstantiateMsg as NativeStakingInstantiateMsg;
 use mesh_native_staking_proxy::contract::sv::mt::CodeId as NativeStakingProxyCodeId;
-use mesh_vault::contract::sv::mt::CodeId as VaultCodeId;
-use mesh_vault::contract::VaultContract;
+use mesh_vault::mock::sv::mt::{CodeId as VaultCodeId, VaultMockProxy};
+use mesh_vault::mock::VaultMock;
 use mesh_vault::msg::{LocalStakingInfo, StakingInitInfo};
 
 use mesh_sync::ValueRange;
 
-use cw_multi_test::App as MtApp;
 use sylvia::multitest::{App, Proxy};
 
 use crate::contract::sv::mt::ExternalStakingContractProxy;
 use crate::test_methods::sv::mt::TestMethodsProxy;
 use mesh_apis::cross_staking_api::sv::mt::CrossStakingApiProxy;
-use mesh_vault::contract::sv::mt::VaultContractProxy;
 
 use crate::contract::sv::mt::CodeId;
 use crate::contract::ExternalStakingContract;
@@ -39,6 +38,12 @@ const SLASHING_PERCENTAGE: u64 = 10;
 const LOCAL_SLASHING_PERCENTAGE_DSIGN: u64 = 5;
 const LOCAL_SLASHING_PERCENTAGE_OFFLINE: u64 = 5;
 
+// Trying to figure out how to work with the generic types
+type MtApp = cw_multi_test::BasicApp<
+    mesh_bindings::VaultCustomMsg,
+    Empty,
+>;
+
 // Shortcut setuping all needed contracts
 //
 // Returns vault and external staking proxies
@@ -47,7 +52,7 @@ fn setup<'app>(
     owner: &'app str,
     unbond_period: u64,
 ) -> AnyResult<(
-    Proxy<'app, MtApp, VaultContract<'app>>,
+    Proxy<'app, MtApp, VaultMock<'app>>,
     Proxy<'app, MtApp, ExternalStakingContract<'app>>,
 )> {
     let native_staking_proxy_code = NativeStakingProxyCodeId::store_code(app);
@@ -94,7 +99,7 @@ fn setup<'app>(
 
 #[test]
 fn instantiate() {
-    let app = App::default();
+    let app =  App::new(AppBuilder::new_custom().build(no_init));
 
     let owner = "owner";
     let users = ["user1"];
@@ -125,14 +130,12 @@ fn staking() {
 
     // Bond tokens
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(users[0])
         .unwrap();
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(users[1])
         .unwrap();
 
@@ -232,14 +235,12 @@ fn unstaking() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(users[0])
         .unwrap();
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(users[1])
         .unwrap();
 
@@ -474,8 +475,7 @@ fn immediate_unstake_if_unbonded_validator() {
     let validators = contract.activate_validators(["validator1"]);
 
     vault
-        .bond()
-        .with_funds(&coins(200, OSMO))
+        .bond(coin(200, OSMO))
         .call(user)
         .unwrap();
     vault.stake(&contract, user, validators[0], coin(200, OSMO));
@@ -513,8 +513,7 @@ fn immediate_unstake_if_tombstoned_validator() {
     let validators = contract.activate_validators(["validator1"]);
 
     vault
-        .bond()
-        .with_funds(&coins(200, OSMO))
+        .bond(coin(200, OSMO))
         .call(user)
         .unwrap();
     vault.stake(&contract, user, validators[0], coin(200, OSMO));
@@ -560,14 +559,12 @@ fn distribution() {
     // 3/5 of validators[0] to users[1]
     // all of validators[1] to users[1]
     vault
-        .bond()
-        .with_funds(&coins(600, OSMO))
+        .bond(coin(600, OSMO))
         .call(users[0])
         .unwrap();
 
     vault
-        .bond()
-        .with_funds(&coins(600, OSMO))
+        .bond(coin(600, OSMO))
         .call(users[1])
         .unwrap();
 
@@ -1164,13 +1161,11 @@ fn batch_distribution() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(600, OSMO))
+        .bond(coin(600, OSMO))
         .call(users[0])
         .unwrap();
     vault
-        .bond()
-        .with_funds(&coins(600, OSMO))
+        .bond(coin(600, OSMO))
         .call(users[1])
         .unwrap();
 
@@ -1209,8 +1204,7 @@ fn batch_distribution_invalid_token() {
     let validator = contract.activate_validators(["validator1"])[0];
 
     vault
-        .bond()
-        .with_funds(&coins(600, OSMO))
+        .bond(coin(600, OSMO))
         .call(user)
         .unwrap();
 
@@ -1235,8 +1229,7 @@ fn slashing() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(user)
         .unwrap();
 
@@ -1380,8 +1373,7 @@ fn slashing_pending_tx_partial_unbond() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(user)
         .unwrap();
 
@@ -1467,8 +1459,7 @@ fn slashing_pending_tx_full_unbond() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(200, OSMO))
+        .bond(coin(200, OSMO))
         .call(user)
         .unwrap();
 
@@ -1550,8 +1541,7 @@ fn slashing_pending_tx_full_unbond_rolled_back() {
     let validators = contract.activate_validators(["validator1"]);
 
     vault
-        .bond()
-        .with_funds(&coins(200, OSMO))
+        .bond(coin(200, OSMO))
         .call(user)
         .unwrap();
 
@@ -1631,8 +1621,7 @@ fn slashing_pending_tx_bond() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(user)
         .unwrap();
 
@@ -1716,8 +1705,7 @@ fn slashing_pending_tx_bond_rolled_back() {
     let validators = contract.activate_validators(["validator1", "validator2"]);
 
     vault
-        .bond()
-        .with_funds(&coins(300, OSMO))
+        .bond(coin(300, OSMO))
         .call(user)
         .unwrap();
 
